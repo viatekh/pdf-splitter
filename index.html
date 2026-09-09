@@ -8,8 +8,11 @@
 <meta name="apple-mobile-web-app-title" content="PDF Split">
 <meta name="color-scheme" content="light dark">
 <title>PDF Splitter</title>
-<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='40' fill='%23c0392b'/%3E%3Cpath d='M52 44h48l28 28v64a8 8 0 0 1-8 8H52a8 8 0 0 1-8-8V52a8 8 0 0 1 8-8z' fill='%23fff'/%3E%3Cpath d='M74 90h32M90 74v32' stroke='%23c0392b' stroke-width='10' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%9C%82%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<meta name="theme-color" content="#c0392b">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
 <style>
   :root{
     --bg:#f5f5f7; --card:#ffffff; --ink:#1c1c1e; --muted:#6e6e73;
@@ -364,6 +367,13 @@
       row.querySelector("button").textContent = "Saved";
     });
   });
+
+  // Offline support: cached by the service worker once served over https.
+  if("serviceWorker" in navigator && window.isSecureContext){
+    window.addEventListener("load", function(){
+      navigator.serviceWorker.register("sw.js").catch(function(){ /* offline is a bonus, not a requirement */ });
+    });
+  }
 
   $("go").addEventListener("click", async function(){
     if(busy || !srcDoc) return;
