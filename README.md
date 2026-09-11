@@ -43,7 +43,12 @@ iOS limits how many downloads a page may start in a row.
 - Size mode binary-searches the real saved size of each chunk, so parts are
   measured, not estimated. A part can still exceed the cap if a single page is
   bigger than the limit — the app flags those; compress that page first.
-- Password-protected PDFs are opened where possible and written out unencrypted.
+- Every part is reopened and page-counted after splitting; anything unreadable
+  is flagged as damaged rather than handed to you silently.
+- Encrypted PDFs cannot be split — pdf-lib has no decryption. A file carrying an
+  encryption marker that still parses is fine and splits normally; one that is
+  genuinely encrypted is rejected with instructions for making a clean copy
+  (Share → Print, pinch out, Share → Save to Files).
 - Everything happens in memory. Very large PDFs (hundreds of MB) can exhaust
   Safari's memory on an iPad; split those on a desktop browser.
 

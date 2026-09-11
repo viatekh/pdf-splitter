@@ -146,6 +146,16 @@
 
   var $ = function(id){ return document.getElementById(id); };
   var srcDoc = null, srcName = "document", totalPages = 0, parts = [], busy = false;
+  var encryptedBytes = false;
+
+  // Looks for an /Encrypt entry in the raw bytes, so a file that fails to parse
+  // can still be reported as encrypted rather than as a parser error.
+  function hasEncryptEntry(bytes){
+    var tail = bytes.subarray(Math.max(0, bytes.length - 8192));
+    var text = "";
+    for(var i = 0; i < tail.length; i++) text += String.fromCharCode(tail[i]);
+    return /\/Encrypt[\s\d]/.test(text);
+  }
 
   function fmtSize(n){
     if(n < 1024) return n + " B";
@@ -172,6 +182,7 @@
     $("pick").textContent = "Reading…";
     try{
       var bytes = new Uint8Array(await f.arrayBuffer());
+      encryptedBytes = hasEncryptEntry(bytes);
       srcDoc = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
       totalPages = srcDoc.getPageCount();
       srcName = f.name.replace(/\.pdf$/i, "") || "document";
@@ -183,13 +194,19 @@
       $("pick").classList.add("has");
       $("go").disabled = false;
       if(srcDoc.isEncrypted){
-        $("loadNote").textContent = "This PDF is password-protected. The parts will be written without encryption, and some files like this fail to split.";
+        $("loadNote").textContent = "This PDF carries an encryption marker, but it opened and read fine. " +
+          "The parts are written without encryption — each one is checked after splitting, and anything damaged is flagged below.";
         show($("loadNote"), true);
       }
     }catch(e){
       $("pick").textContent = "Choose a PDF";
       show($("meta"), false);
-      setErr("Could not read that PDF: " + (e && e.message ? e.message : e));
+      if(encryptedBytes){
+        setErr("This PDF is encrypted, and encrypted files cannot be split here. Make an unprotected copy first: " +
+               "open the PDF, tap Share \u2192 Print, pinch outwards on the preview, then Share \u2192 Save to Files. Split that copy.");
+      }else{
+        setErr("Could not read that PDF: " + (e && e.message ? e.message : e));
+      }
     }
   });
 
@@ -221,6 +238,17 @@
     var copied = await out.copyPages(srcDoc, indices);
     copied.forEach(function(p){ out.addPage(p); });
     return out.save({ useObjectStreams: true });
+  }
+
+  // Re-open a finished part and confirm it has the pages it should. Cheap next
+  // to building it, and the only way to be sure a part is really readable.
+  async function verify(bytes, expected){
+    try{
+      var check = await PDFDocument.load(bytes);
+      return check.getPageCount() === expected;
+    }catch(e){
+      return false;
+    }
   }
 
   function progress(done){
@@ -311,7 +339,8 @@
         blob: new Blob([p.bytes], { type: "application/pdf" }),
         label: (pages === 1 ? "page " + p.from : "pages " + p.from + "–" + p.to + " · " + pages + " pages") +
                " · " + fmtSize(p.bytes.length),
-        over: p.bytes.length > maxBytes
+        over: p.bytes.length > maxBytes,
+        broken: p.ok === false
       };
     });
 
@@ -327,7 +356,9 @@
       nm.textContent = part.name;
       var dm = document.createElement("div");
       dm.className = "dims";
-      dm.textContent = part.label + (part.over ? " · still over the limit" : "");
+      dm.textContent = part.label +
+        (part.broken ? " · damaged, do not upload" : "") +
+        (part.over ? " · still over the limit" : "");
       info.appendChild(nm); info.appendChild(dm);
       var btn = document.createElement("button");
       btn.textContent = "Save";
@@ -341,6 +372,13 @@
     });
 
     show($("results"), true);
+    var broken = parts.filter(function(p){ return p.broken; }).length;
+    if(broken){
+      setErr(broken + " part" + (broken > 1 ? "s" : "") + " could not be reopened after splitting, so " +
+        (broken > 1 ? "they are" : "it is") + " damaged. This normally means the source PDF is encrypted or corrupt; " +
+        "re-save an unprotected copy (Share → Print, pinch out, Share → Save to Files) and split that.");
+      return;
+    }
     var over = parts.filter(function(p){ return p.over; }).length;
     if(over) setErr(over + " part" + (over > 1 ? "s are" : " is") +
       " still above the size limit — a single page can be larger than the cap. Try splitting that part again with fewer pages, or compress the PDF first.");
@@ -389,6 +427,10 @@
         ? Math.round(parseFloat($("maxMB").value) * 1024 * 1024)
         : Infinity;
       var made = await split();
+      for(var i = 0; i < made.length; i++){
+        await breathe();
+        made[i].ok = await verify(made[i].bytes, made[i].to - made[i].from + 1);
+      }
       render(made, maxBytes);
     }catch(e){
       setErr(e && e.message ? e.message : String(e));
