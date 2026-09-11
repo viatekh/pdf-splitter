@@ -64,6 +64,7 @@
   .part.done button{color:var(--ok);border-color:var(--ok)}
   .bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:12px}
   .bar>i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+  .status{font-size:13px;color:var(--muted);margin:8px 2px 0;font-variant-numeric:tabular-nums}
   .note{font-size:14px;border-radius:10px;padding:10px 12px;margin-top:12px;background:var(--warn-bg);color:var(--warn)}
   .hide{display:none}
   footer{color:var(--muted);font-size:12px;text-align:center;margin-top:22px}
@@ -112,6 +113,7 @@
 
   <button class="primary" id="go" disabled>Split PDF</button>
   <div class="bar hide" id="barWrap"><i id="bar"></i></div>
+  <p class="status hide" id="status"></p>
   <div class="note hide" id="err"></div>
 
   <div class="card hide" id="results">
@@ -146,6 +148,7 @@
 
   var $ = function(id){ return document.getElementById(id); };
   var srcDoc = null, srcName = "document", totalPages = 0, parts = [], busy = false;
+  var srcSize = 0;
   var encryptedBytes = false;
 
   // Looks for an /Encrypt entry in the raw bytes, so a file that fails to parse
@@ -163,6 +166,11 @@
     return (n/1048576).toFixed(1) + " MB";
   }
   function show(el, on){ el.classList.toggle("hide", !on); }
+  function status(msg){
+    var el = $("status");
+    el.textContent = msg || "";
+    show(el, !!msg);
+  }
   function setErr(msg){ var e = $("err"); e.textContent = msg || ""; show(e, !!msg); }
   function breathe(){ return new Promise(function(r){ setTimeout(r, 0); }); }
 
@@ -189,6 +197,7 @@
       $("mName").textContent = f.name;
       $("mPages").textContent = totalPages;
       $("mSize").textContent = fmtSize(f.size);
+      srcSize = f.size;
       show($("meta"), true);
       $("pick").textContent = "Choose a different PDF";
       $("pick").classList.add("has");
@@ -255,20 +264,35 @@
     $("bar").style.width = Math.round(done / totalPages * 100) + "%";
   }
 
-  // Largest run of pages from `start` (at most `cap`) that still saves under maxBytes.
-  async function fitChunk(start, cap, maxBytes){
-    var bytes = await build(seq(start, cap));
-    if(bytes.length <= maxBytes || cap === 1) return { count: cap, bytes: bytes };
-    var lo = 1, hi = cap - 1, bestN = 0, bestB = null;
-    while(lo <= hi){
-      var mid = (lo + hi) >> 1;
+  // Largest run of pages from `start` (at most `cap`) that still saves under
+  // maxBytes. A binary search costs ~log2(cap) full rebuilds of the chunk;
+  // estimating from the bytes-per-page seen so far usually costs one or two.
+  async function fitChunk(start, cap, maxBytes, perPage, note){
+    var guess = Math.max(1, Math.min(cap, Math.round(maxBytes * 0.97 / perPage)));
+    note(guess);
+    var bytes = await build(seq(start, guess));
+
+    // Too big: shrink in proportion to the overshoot until it fits.
+    while(bytes.length > maxBytes && guess > 1){
+      var next = Math.floor(guess * (maxBytes / bytes.length) * 0.97);
+      if(next >= guess) next = guess - 1;
+      guess = Math.max(1, next);
+      note(guess);
       await breathe();
-      var b = await build(seq(start, mid));
-      if(b.length <= maxBytes){ bestN = mid; bestB = b; lo = mid + 1; }
-      else { hi = mid - 1; }
+      bytes = await build(seq(start, guess));
     }
-    if(bestN === 0) return { count: 1, bytes: await build(seq(start, 1)) };
-    return { count: bestN, bytes: bestB };
+
+    // Comfortably under and there are pages left: one attempt at a bigger bite.
+    if(guess < cap && bytes.length < maxBytes * 0.92){
+      var grow = Math.min(cap, Math.floor(guess * (maxBytes / bytes.length) * 0.97));
+      if(grow > guess){
+        note(grow);
+        await breathe();
+        var bigger = await build(seq(start, grow));
+        if(bigger.length <= maxBytes){ guess = grow; bytes = bigger; }
+      }
+    }
+    return { count: guess, bytes: bytes };
   }
 
   function parseRanges(text){
@@ -297,12 +321,16 @@
       if(!(mb > 0)) throw new Error("Enter a size limit above 0 MB.");
       if(!(mp > 0)) throw new Error("Enter a page limit above 0.");
       maxBytes = Math.round(mb * 1024 * 1024);
-      var start = 0, made = [];
+      var start = 0, made = [], perPage = Math.max(1, srcSize / totalPages);
       while(start < totalPages){
         var cap = Math.min(mp, totalPages - start);
         await breathe();
-        var fit = await fitChunk(start, cap, maxBytes);
+        var partNo = made.length + 1, from = start;
+        var fit = await fitChunk(start, cap, maxBytes, perPage, function(n){
+          status("Part " + partNo + " \u00b7 pages " + (from + 1) + "\u2013" + (from + n));
+        });
         made.push({ from: start + 1, to: start + fit.count, bytes: fit.bytes });
+        perPage = Math.max(1, fit.bytes.length / fit.count);
         start += fit.count;
         progress(start);
       }
@@ -321,6 +349,7 @@
     var made2 = [], done = 0;
     for(var g = 0; g < groups.length; g++){
       await breathe();
+      status("Part " + (g + 1) + " of " + groups.length);
       var idx = groups[g];
       made2.push({ from: idx[0] + 1, to: idx[idx.length - 1] + 1, bytes: await build(idx) });
       done += idx.length;
@@ -419,6 +448,7 @@
     setErr("");
     show($("results"), false);
     show($("barWrap"), true);
+    status("Reading pages\u2026");
     $("bar").style.width = "0%";
     $("go").disabled = true;
     $("go").textContent = "Splitting…";
@@ -429,6 +459,7 @@
       var made = await split();
       for(var i = 0; i < made.length; i++){
         await breathe();
+        status("Checking part " + (i + 1) + " of " + made.length);
         made[i].ok = await verify(made[i].bytes, made[i].to - made[i].from + 1);
       }
       render(made, maxBytes);
@@ -439,6 +470,7 @@
       $("go").disabled = false;
       $("go").textContent = "Split PDF";
       show($("barWrap"), false);
+      status("");
     }
   });
 })();
