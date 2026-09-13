@@ -27,9 +27,11 @@ caching is simply unnecessary.
 
 1. **Choose a PDF** — reads from Files, iCloud Drive, anywhere the picker goes.
 2. Pick how to split:
-   - **Size limit** (default) — packs as many pages as fit under a size cap and
-     a page cap. Defaults are 25 MB / 100 pages, just under Claude's 30 MB and
-     100-page limits.
+   - **Size limit** (default) — divides the file size by its page count, works
+     out how many pages fit in the cap (with 10% headroom), and cuts equal
+     parts of that many pages. It tells you the plan before you start: "averages
+     460 KB a page, so 50 pages fit in 25 MB — 8 parts." Defaults are 25 MB /
+     100 pages, just under Claude's 30 MB and 100-page limits.
    - **Every N pages** — equal chunks.
    - **Page ranges** — `1-10, 12, 30-` gives three parts (`30-` runs to the end).
 3. **Split PDF**, then **Save** each part. Parts land in Files → Downloads,
@@ -40,9 +42,10 @@ iOS limits how many downloads a page may start in a row.
 
 ### Notes
 
-- Size mode binary-searches the real saved size of each chunk, so parts are
-  measured, not estimated. A part can still exceed the cap if a single page is
-  bigger than the limit — the app flags those; compress that page first.
+- Size mode works from the file's average page weight, so it builds each part
+  exactly once — no probing. The trade is that a file with very uneven pages
+  can overshoot the cap; every part is measured afterwards and anything over is
+  flagged, so lower the MB and run it again if that happens.
 - Every part is reopened and page-counted after splitting; anything unreadable
   is flagged as damaged rather than handed to you silently.
 - Encrypted PDFs cannot be split — pdf-lib has no decryption. A file carrying an

@@ -97,7 +97,7 @@
         <div><label for="maxMB">Max MB per part</label><input type="number" id="maxMB" value="25" min="1" max="500" step="1" inputmode="decimal"></div>
         <div><label for="maxPages">Max pages per part</label><input type="number" id="maxPages" value="100" min="1" step="1" inputmode="numeric"></div>
       </div>
-      <p class="hint">Claude accepts up to 30&nbsp;MB and 100 pages per PDF, so these defaults leave a little headroom.</p>
+      <p class="hint" id="plan">Claude accepts up to 30&nbsp;MB and 100 pages per PDF, so these defaults leave a little headroom.</p>
     </div>
 
     <div id="paneEvery" class="hide">
@@ -191,6 +191,21 @@
     }
   });
 
+  // Shows the split it is about to make, so the plan is visible before the work.
+  function showPlan(){
+    var el = $("plan");
+    if(!srcDoc){
+      el.textContent = "Claude accepts up to 30 MB and 100 pages per PDF, so these defaults leave a little headroom.";
+      return;
+    }
+    var mb = parseFloat($("maxMB").value), mp = parseInt($("maxPages").value, 10);
+    if(!(mb > 0) || !(mp > 0)){ el.textContent = "Enter a size and page limit above 0."; return; }
+    var n = pagesPerPart(Math.round(mb * 1024 * 1024), mp);
+    var count = Math.ceil(totalPages / n);
+    el.textContent = "This file averages " + fmtSize(srcSize / totalPages) + " a page, so " +
+      n + " pages fit in " + mb + " MB \u2014 " + count + (count === 1 ? " part." : " parts.");
+  }
+
   function status(msg){
     var el = $("status");
     el.textContent = msg || "";
@@ -227,6 +242,7 @@
       $("pick").textContent = "Choose a different PDF";
       $("pick").classList.add("has");
       $("go").disabled = false;
+      showPlan();
       if(srcDoc.isEncrypted){
         $("loadNote").textContent = "This PDF carries an encryption marker, but it opened and read fine. " +
           "The parts are written without encryption — each one is checked after splitting, and anything damaged is flagged below.";
@@ -245,6 +261,9 @@
   });
 
   /* ---------- mode switching ---------- */
+
+  $("maxMB").addEventListener("input", showPlan);
+  $("maxPages").addEventListener("input", showPlan);
 
   var mode = "auto";
   Array.prototype.forEach.call($("mode").children, function(b){
@@ -289,35 +308,13 @@
     $("bar").style.width = Math.round(done / totalPages * 100) + "%";
   }
 
-  // Largest run of pages from `start` (at most `cap`) that still saves under
-  // maxBytes. A binary search costs ~log2(cap) full rebuilds of the chunk;
-  // estimating from the bytes-per-page seen so far usually costs one or two.
-  async function fitChunk(start, cap, maxBytes, perPage, note){
-    var guess = Math.max(1, Math.min(cap, Math.round(maxBytes * 0.97 / perPage)));
-    note(guess);
-    var bytes = await build(seq(start, guess));
-
-    // Too big: shrink in proportion to the overshoot until it fits.
-    while(bytes.length > maxBytes && guess > 1){
-      var next = Math.floor(guess * (maxBytes / bytes.length) * 0.97);
-      if(next >= guess) next = guess - 1;
-      guess = Math.max(1, next);
-      note(guess);
-      await breathe();
-      bytes = await build(seq(start, guess));
-    }
-
-    // Comfortably under and there are pages left: one attempt at a bigger bite.
-    if(guess < cap && bytes.length < maxBytes * 0.92){
-      var grow = Math.min(cap, Math.floor(guess * (maxBytes / bytes.length) * 0.97));
-      if(grow > guess){
-        note(grow);
-        await breathe();
-        var bigger = await build(seq(start, grow));
-        if(bigger.length <= maxBytes){ guess = grow; bytes = bigger; }
-      }
-    }
-    return { count: guess, bytes: bytes };
+  // Pages per part for the size limit: one division against the file's average
+  // page weight, applied up front. No probing, no rebuilds — every part is
+  // built exactly once, which is what keeps a big PDF quick on an iPad.
+  function pagesPerPart(maxBytes, maxPages){
+    var perPage = Math.max(1, srcSize / totalPages);
+    var n = Math.floor(maxBytes * 0.9 / perPage);       // 10% headroom for uneven pages
+    return Math.max(1, Math.min(maxPages, totalPages, n));
   }
 
   function parseRanges(text){
@@ -340,31 +337,21 @@
   async function split(){
     var maxBytes = Infinity, groups = null;
 
+    var n = 0;
+
     if(mode === "auto"){
       var mb = parseFloat($("maxMB").value);
       var mp = parseInt($("maxPages").value, 10);
       if(!(mb > 0)) throw new Error("Enter a size limit above 0 MB.");
       if(!(mp > 0)) throw new Error("Enter a page limit above 0.");
       maxBytes = Math.round(mb * 1024 * 1024);
-      var start = 0, made = [], perPage = Math.max(1, srcSize / totalPages);
-      while(start < totalPages){
-        var cap = Math.min(mp, totalPages - start);
-        await breathe();
-        var partNo = made.length + 1, from = start;
-        var fit = await fitChunk(start, cap, maxBytes, perPage, function(n){
-          status("Part " + partNo + " \u00b7 pages " + (from + 1) + "\u2013" + (from + n));
-        });
-        made.push({ from: start + 1, to: start + fit.count, bytes: fit.bytes });
-        perPage = Math.max(1, fit.bytes.length / fit.count);
-        start += fit.count;
-        progress(start);
-      }
-      return made;
+      n = pagesPerPart(maxBytes, mp);
+    } else if(mode === "every"){
+      n = parseInt($("everyN").value, 10);
+      if(!(n > 0)) throw new Error("Enter a page count above 0.");
     }
 
-    if(mode === "every"){
-      var n = parseInt($("everyN").value, 10);
-      if(!(n > 0)) throw new Error("Enter a page count above 0.");
+    if(n > 0){
       groups = [];
       for(var i = 0; i < totalPages; i += n) groups.push(seq(i, Math.min(n, totalPages - i)));
     } else {

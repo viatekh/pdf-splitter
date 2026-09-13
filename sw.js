@@ -1,6 +1,6 @@
 /* Cache-first service worker: the app is static, so once it is cached the
    page works with no network at all. Bump CACHE when index.html changes. */
-var CACHE = "pdf-splitter-v4";
+var CACHE = "pdf-splitter-v5";
 var ASSETS = [
   "./",
   "./index.html",
