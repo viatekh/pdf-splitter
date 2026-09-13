@@ -51,6 +51,10 @@ iOS limits how many downloads a page may start in a row.
   (Share → Print, pinch out, Share → Save to Files).
 - Everything happens in memory. Very large PDFs (hundreds of MB) can exhaust
   Safari's memory on an iPad; split those on a desktop browser.
+- Splitting only runs while the page is on screen. iOS suspends a backgrounded
+  tab, so switching apps pauses the work until you come back — there is no web
+  API that lifts this. The app takes a screen wake lock for the duration so the
+  iPad will not sleep part-way through, and says "Paused" if you do leave.
 
 ## Files
 

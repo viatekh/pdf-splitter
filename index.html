@@ -112,6 +112,7 @@
   </div>
 
   <button class="primary" id="go" disabled>Split PDF</button>
+  <p class="hint" id="stayHint" style="text-align:center">Keep this page on screen while it works — iOS pauses a tab you switch away from.</p>
   <div class="bar hide" id="barWrap"><i id="bar"></i></div>
   <p class="status hide" id="status"></p>
   <div class="note hide" id="err"></div>
@@ -166,6 +167,30 @@
     return (n/1048576).toFixed(1) + " MB";
   }
   function show(el, on){ el.classList.toggle("hide", !on); }
+  // iOS suspends a backgrounded page, so a long split can only run while this
+  // page is on screen. A screen wake lock at least stops the iPad sleeping
+  // part-way through; it is released as soon as the work finishes.
+  var wakeLock = null;
+  async function keepAwake(on){
+    try{
+      if(on){
+        if(!wakeLock && "wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen");
+      }else if(wakeLock){
+        await wakeLock.release();
+        wakeLock = null;
+      }
+    }catch(e){ /* unsupported or refused: the split still runs */ }
+  }
+
+  document.addEventListener("visibilitychange", function(){
+    if(document.visibilityState === "visible"){
+      if(busy) keepAwake(true);          // re-arm: a lock is dropped on hide
+    }else if(busy){
+      wakeLock = null;                   // already released by the browser
+      status("Paused \u2014 reopen this tab to carry on");
+    }
+  });
+
   function status(msg){
     var el = $("status");
     el.textContent = msg || "";
@@ -449,6 +474,7 @@
     show($("results"), false);
     show($("barWrap"), true);
     status("Reading pages\u2026");
+    keepAwake(true);
     $("bar").style.width = "0%";
     $("go").disabled = true;
     $("go").textContent = "Splitting…";
@@ -471,6 +497,7 @@
       $("go").textContent = "Split PDF";
       show($("barWrap"), false);
       status("");
+      keepAwake(false);
     }
   });
 })();
