@@ -146,10 +146,13 @@
 (function(){
   "use strict";
   var PDFDocument = PDFLib.PDFDocument;
+  var PDFName = PDFLib.PDFName, PDFDict = PDFLib.PDFDict, PDFArray = PDFLib.PDFArray;
+  var PDFRawStream = PDFLib.PDFRawStream, decodePDFRawStream = PDFLib.decodePDFRawStream;
 
   var $ = function(id){ return document.getElementById(id); };
   var srcDoc = null, srcName = "document", totalPages = 0, parts = [], busy = false;
   var srcSize = 0;
+  var calib = null;   // { overhead, marginal } measured from real builds
   var encryptedBytes = false;
 
   // Looks for an /Encrypt entry in the raw bytes, so a file that fails to parse
@@ -162,6 +165,7 @@
   }
 
   function fmtSize(n){
+    n = Math.round(n);
     if(n < 1024) return n + " B";
     if(n < 1048576) return (n/1024).toFixed(0) + " KB";
     return (n/1048576).toFixed(1) + " MB";
@@ -201,9 +205,21 @@
     var mb = parseFloat($("maxMB").value), mp = parseInt($("maxPages").value, 10);
     if(!(mb > 0) || !(mp > 0)){ el.textContent = "Enter a size and page limit above 0."; return; }
     var n = pagesPerPart(Math.round(mb * 1024 * 1024), mp);
+    if(n === 0){
+      el.textContent = "Every part has to carry " + fmtSize(calib.overhead) +
+        " of images and fonts shared across the whole PDF, so the smallest possible part is about " +
+        fmtSize(smallestPossible()) + ". Raise the limit above that, or compress the PDF first.";
+      return;
+    }
     var count = Math.ceil(totalPages / n);
-    el.textContent = "This file averages " + fmtSize(srcSize / totalPages) + " a page, so " +
-      n + " pages fit in " + mb + " MB \u2014 " + count + (count === 1 ? " part." : " parts.");
+    if(calib){
+      el.textContent = "Measured " + fmtSize(calib.overhead) + " shared by every part plus " +
+        fmtSize(calib.marginal) + " a page, so " + n + " pages fit in " + mb + " MB \u2014 " +
+        count + (count === 1 ? " part." : " parts.");
+    }else{
+      el.textContent = "This file averages " + fmtSize(srcSize / totalPages) + " a page, so " +
+        n + " pages fit in " + mb + " MB \u2014 " + count + (count === 1 ? " part." : " parts.");
+    }
   }
 
   function status(msg){
@@ -241,6 +257,12 @@
       show($("meta"), true);
       $("pick").textContent = "Choose a different PDF";
       $("pick").classList.add("has");
+      calib = null;
+      $("pick").textContent = "Measuring\u2026";
+      await breathe();
+      pruneAll();
+      await calibrate();
+      $("pick").textContent = "Choose a different PDF";
       $("go").disabled = false;
       showPlan();
       if(srcDoc.isEncrypted){
@@ -308,13 +330,93 @@
     $("bar").style.width = Math.round(done / totalPages * 100) + "%";
   }
 
-  // Pages per part for the size limit: one division against the file's average
-  // page weight, applied up front. No probing, no rebuilds — every part is
-  // built exactly once, which is what keeps a big PDF quick on an iPad.
+  // Many PDFs (manuals especially) declare every image and font once, high in
+  // the page tree, so each page inherits the lot. Copying any page then drags
+  // the whole pool along and every part comes out nearly file-sized. Narrow
+  // each page's resources to the names its own content stream actually uses.
+  function pageContent(page){
+    var c = page.Contents();
+    if(!c) return null;
+    var streams = c instanceof PDFArray ? c.asArray().map(function(r){ return srcDoc.context.lookup(r); }) : [c];
+    var text = "";
+    for(var i = 0; i < streams.length; i++){
+      if(!(streams[i] instanceof PDFRawStream)) return null;
+      try{
+        var bytes = decodePDFRawStream(streams[i]).decode();
+        for(var j = 0; j < bytes.length; j++) text += String.fromCharCode(bytes[j]);
+      }catch(e){ return null; }
+    }
+    return text;
+  }
+
+  var PRUNABLE = ["XObject", "Font", "ExtGState", "Shading", "Pattern", "ColorSpace", "Properties"];
+
+  function prunePage(page){
+    var res = page.Resources();
+    if(!(res instanceof PDFDict)) return false;
+    var text = pageContent(page);
+    if(text === null) return false;                     // can't read it, so keep everything
+    var names = text.match(/\/[^\s\/\[\]<>(){}]+/g) || [];
+    var used = {};
+    for(var i = 0; i < names.length; i++) used[names[i].slice(1)] = true;
+
+    var trimmed = srcDoc.context.obj({}), sawForm = false;
+    var entries = res.entries();
+    for(var e = 0; e < entries.length; e++){
+      var key = entries[e][0], val = entries[e][1];
+      var cat = key.asString().slice(1);
+      var sub = srcDoc.context.lookup(val);
+      if(PRUNABLE.indexOf(cat) === -1 || !(sub instanceof PDFDict)){ trimmed.set(key, val); continue; }
+      var kept = srcDoc.context.obj({}), subEntries = sub.entries();
+      for(var k = 0; k < subEntries.length; k++){
+        if(!used[subEntries[k][0].asString().slice(1)]) continue;
+        var target = srcDoc.context.lookup(subEntries[k][1]);
+        if(cat === "XObject" && target && target.dict &&
+           target.dict.get(PDFName.of("Subtype")) === PDFName.of("Form")) sawForm = true;
+        kept.set(subEntries[k][0], subEntries[k][1]);
+      }
+      trimmed.set(key, kept);
+    }
+    // A form XObject can draw using resources it does not name itself, so leave
+    // any page holding one exactly as it was.
+    if(sawForm) return false;
+    page.set(PDFName.of("Resources"), trimmed);
+    return true;
+  }
+
+  function pruneAll(){
+    var pages = srcDoc.getPages(), n = 0;
+    for(var i = 0; i < pages.length; i++){ if(prunePage(pages[i].node)) n++; }
+    return n;
+  }
+
+  // A part's size is not pages x average: it is whatever every part has to
+  // carry (shared images, fonts) plus a per-page cost. Build two small probes
+  // and solve for both, so the page count comes from measurement, not a guess.
+  async function calibrate(){
+    var nA = Math.min(2, totalPages), nB = Math.min(12, totalPages);
+    if(totalPages < 3 || nB <= nA){ calib = null; return; }
+    var a = (await build(seq(0, nA))).length;
+    await breathe();
+    var b = (await build(seq(0, nB))).length;
+    var marginal = Math.max(1, (b - a) / (nB - nA));
+    calib = { overhead: Math.max(0, a - nA * marginal), marginal: marginal };
+  }
+
+  // Pages per part, from the measured model. Returns 0 when even one page
+  // cannot fit, which means no page count can satisfy the cap.
   function pagesPerPart(maxBytes, maxPages){
-    var perPage = Math.max(1, srcSize / totalPages);
-    var n = Math.floor(maxBytes * 0.9 / perPage);       // 10% headroom for uneven pages
-    return Math.max(1, Math.min(maxPages, totalPages, n));
+    if(!calib){
+      var perPage = Math.max(1, srcSize / totalPages);
+      return Math.max(1, Math.min(maxPages, totalPages, Math.floor(maxBytes * 0.9 / perPage)));
+    }
+    var usable = maxBytes * 0.97 - calib.overhead;
+    if(usable < calib.marginal) return 0;
+    return Math.max(1, Math.min(maxPages, totalPages, Math.floor(usable / calib.marginal)));
+  }
+
+  function smallestPossible(){
+    return calib ? calib.overhead + calib.marginal : 0;
   }
 
   function parseRanges(text){
@@ -346,6 +448,9 @@
       if(!(mp > 0)) throw new Error("Enter a page limit above 0.");
       maxBytes = Math.round(mb * 1024 * 1024);
       n = pagesPerPart(maxBytes, mp);
+      if(n === 0) throw new Error("No split can meet " + mb + " MB: every part must carry " +
+        fmtSize(calib.overhead) + " of shared images and fonts, making the smallest possible part about " +
+        fmtSize(smallestPossible()) + ". Raise the limit above that, or compress the PDF first.");
     } else if(mode === "every"){
       n = parseInt($("everyN").value, 10);
       if(!(n > 0)) throw new Error("Enter a page count above 0.");
@@ -363,7 +468,26 @@
       await breathe();
       status("Part " + (g + 1) + " of " + groups.length);
       var idx = groups[g];
-      made2.push({ from: idx[0] + 1, to: idx[idx.length - 1] + 1, bytes: await build(idx) });
+      var bytes = await build(idx);
+      // Measured from two probes, so an unusually heavy stretch can still
+      // overshoot. Shrink this part once, in proportion, and push the pages it
+      // drops into the next part.
+      if(bytes.length > maxBytes && idx.length > 1){
+        var shrunk = Math.max(1, Math.floor(idx.length * (maxBytes / bytes.length) * 0.95));
+        if(shrunk < idx.length){
+          await breathe();
+          status("Part " + (g + 1) + " \u00b7 trimming to " + shrunk + " pages");
+          var retry = await build(seq(idx[0], shrunk));
+          if(retry.length <= maxBytes){
+            var rest = [];
+            for(var r = idx[0] + shrunk; r < idx[0] + idx.length; r++) rest.push(r);
+            idx = seq(idx[0], shrunk);
+            bytes = retry;
+            if(rest.length) groups.splice(g + 1, 0, rest);
+          }
+        }
+      }
+      made2.push({ from: idx[0] + 1, to: idx[idx.length - 1] + 1, bytes: bytes });
       done += idx.length;
       progress(Math.min(done, totalPages));
     }
@@ -422,7 +546,7 @@
     }
     var over = parts.filter(function(p){ return p.over; }).length;
     if(over) setErr(over + " part" + (over > 1 ? "s are" : " is") +
-      " still above the size limit — a single page can be larger than the cap. Try splitting that part again with fewer pages, or compress the PDF first.");
+      " still above the size limit. That means pages heavier than the measured average, or a single page bigger than the cap. Lower the MB a little and split again, or compress the PDF first.");
   }
 
   function save(part){

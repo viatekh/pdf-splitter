@@ -27,11 +27,12 @@ caching is simply unnecessary.
 
 1. **Choose a PDF** — reads from Files, iCloud Drive, anywhere the picker goes.
 2. Pick how to split:
-   - **Size limit** (default) — divides the file size by its page count, works
-     out how many pages fit in the cap (with 10% headroom), and cuts equal
-     parts of that many pages. It tells you the plan before you start: "averages
-     460 KB a page, so 50 pages fit in 25 MB — 8 parts." Defaults are 25 MB /
-     100 pages, just under Claude's 30 MB and 100-page limits.
+   - **Size limit** (default) — measures the file with two small probe builds,
+     separating what every part must carry (shared images and fonts) from the
+     per-page cost, then cuts equal parts that fit. It shows the plan before
+     you start: "Measured 487 KB shared by every part plus 61 KB a page, so 100
+     pages fit in 25 MB — 6 parts." Defaults are 25 MB / 100 pages, just under
+     Claude's 30 MB and 100-page limits.
    - **Every N pages** — equal chunks.
    - **Page ranges** — `1-10, 12, 30-` gives three parts (`30-` runs to the end).
 3. **Split PDF**, then **Save** each part. Parts land in Files → Downloads,
@@ -42,10 +43,14 @@ iOS limits how many downloads a page may start in a row.
 
 ### Notes
 
-- Size mode works from the file's average page weight, so it builds each part
-  exactly once — no probing. The trade is that a file with very uneven pages
-  can overshoot the cap; every part is measured afterwards and anything over is
-  flagged, so lower the MB and run it again if that happens.
+- Each page's resources are narrowed to what its own content stream uses
+  before anything is copied. Many PDFs declare every image and font once, high
+  in the page tree, so each page inherits the lot and a naive copy drags the
+  whole pool into every part — a 35 MB manual splitting into six 35 MB parts.
+  Pages holding form XObjects are left untouched, since those can draw with
+  resources they do not name.
+- A part that still lands over the cap is rebuilt once, smaller, and the pages
+  it drops move into the next part. Anything over after that is flagged.
 - Every part is reopened and page-counted after splitting; anything unreadable
   is flagged as damaged rather than handed to you silently.
 - Encrypted PDFs cannot be split — pdf-lib has no decryption. A file carrying an
