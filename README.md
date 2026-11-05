@@ -58,7 +58,15 @@ iOS limits how many downloads a page may start in a row.
   folded into its page's set, nested forms included, so a running header drawn
   as a form does not disable the trimming for every page that has one.
 - A part that still lands over the cap is rebuilt once, smaller, and the pages
-  it drops move into the next part. Anything over after that is flagged.
+  it drops move into the next part.
+- When resources really are shared by every page, no split can meet the cap.
+  The app then reports what that weight is made of — images, and how many, or
+  embedded fonts — and offers **Shrink images to fit**, which re-encodes the
+  images through a canvas at progressively smaller sizes (1600px/0.75,
+  1100px/0.65, 800px/0.55) until the split fits. Text, layout and the page
+  count are untouched; only picture resolution drops. Images carrying
+  transparency, image masks, and anything in a format the browser cannot
+  decode are left alone. Anything over after that is flagged.
 - Every part is reopened and page-counted after splitting; anything unreadable
   is flagged as damaged rather than handed to you silently.
 - Encrypted PDFs cannot be split — pdf-lib has no decryption. A file carrying an

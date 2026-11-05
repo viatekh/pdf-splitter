@@ -98,6 +98,7 @@
         <div><label for="maxMB">Max MB per part</label><input type="number" id="maxMB" value="25" min="1" max="500" step="1" inputmode="decimal"></div>
         <div><label for="maxPages">Max pages per part</label><input type="number" id="maxPages" value="100" min="1" step="1" inputmode="numeric"></div>
       </div>
+      <button id="shrink" class="hide" style="width:100%;margin-top:12px">Shrink images to fit</button>
       <p class="hint" id="plan">Claude accepts up to 30&nbsp;MB and 100 pages per PDF, so these defaults leave a little headroom.</p>
     </div>
 
@@ -126,7 +127,7 @@
   </div>
 
   <footer>
-    <b id="ver">v8</b> · updated 5 November 2026<br>
+    <b id="ver">v9</b> · updated 5 November 2026<br>
     Runs entirely offline · pdf-lib
   </footer>
 </div>
@@ -152,11 +153,13 @@
   var PDFDocument = PDFLib.PDFDocument;
   var PDFName = PDFLib.PDFName, PDFDict = PDFLib.PDFDict, PDFArray = PDFLib.PDFArray;
   var PDFRawStream = PDFLib.PDFRawStream, decodePDFRawStream = PDFLib.decodePDFRawStream;
+  var PDFNumber = PDFLib.PDFNumber;
 
   var $ = function(id){ return document.getElementById(id); };
   var srcDoc = null, srcName = "document", totalPages = 0, parts = [], busy = false;
   var srcSize = 0;
   var calib = null;   // { overhead, marginal } measured from real builds
+  var parts0 = null;  // what a one-page part is made of
   var encryptedBytes = false;
 
   // Looks for an /Encrypt entry in the raw bytes, so a file that fails to parse
@@ -210,11 +213,21 @@
     if(!(mb > 0) || !(mp > 0)){ el.textContent = "Enter a size and page limit above 0."; return; }
     var n = pagesPerPart(Math.round(mb * 1024 * 1024), mp);
     if(n === 0){
+      var what = "";
+      if(parts0 && parts0.image + parts0.font > 0){
+        what = " That weight is " + fmtSize(parts0.image) + " of images across " + parts0.images +
+               " of them, and " + fmtSize(parts0.font) + " of embedded fonts.";
+      }
       el.textContent = "Every part has to carry " + fmtSize(calib.overhead) +
-        " of images and fonts shared across the whole PDF, so the smallest possible part is about " +
-        fmtSize(smallestPossible()) + ". Raise the limit above that, or compress the PDF first.";
+        " shared across the whole PDF, so the smallest possible part is about " +
+        fmtSize(smallestPossible()) + "." + what +
+        (parts0 && parts0.image > parts0.font
+          ? " Shrinking the images should bring it under the limit."
+          : " Most of that is fonts, which this app cannot shrink \u2014 raise the limit or compress the PDF elsewhere.");
+      show($("shrink"), !!(parts0 && parts0.image > calib.overhead * 0.4));
       return;
     }
+    show($("shrink"), false);
     var count = Math.ceil(totalPages / n);
     if(calib){
       el.textContent = "Measured " + fmtSize(calib.overhead) + " shared by every part plus " +
@@ -287,6 +300,44 @@
   });
 
   /* ---------- mode switching ---------- */
+
+  $("shrink").addEventListener("click", async function(){
+    if(busy || !srcDoc) return;
+    busy = true;
+    setErr("");
+    $("shrink").disabled = true;
+    $("go").disabled = true;
+    show($("barWrap"), true);
+    keepAwake(true);
+    var mb = parseFloat($("maxMB").value), mp = parseInt($("maxPages").value, 10);
+    var maxBytes = Math.round(mb * 1024 * 1024);
+    var passes = [[1600, 0.75], [1100, 0.65], [800, 0.55]], total = 0;
+    try{
+      for(var i = 0; i < passes.length; i++){
+        status("Shrinking images, pass " + (i + 1) + " of " + passes.length + "\u2026");
+        await breathe();
+        var r = await shrinkAllImages(passes[i][0], passes[i][1]);
+        total += r.saved;
+        status("Re-measuring\u2026");
+        await breathe();
+        await calibrate();
+        if(pagesPerPart(maxBytes, mp) > 0) break;
+      }
+      showPlan();
+      $("loadNote").textContent = "Images shrunk, saving " + fmtSize(total) + ". Text is untouched; " +
+        "pictures are lower resolution. Reload the file to start from the original again.";
+      show($("loadNote"), true);
+    }catch(e){
+      setErr("Could not shrink the images: " + (e && e.message ? e.message : e));
+    }finally{
+      busy = false;
+      $("shrink").disabled = false;
+      $("go").disabled = false;
+      show($("barWrap"), false);
+      status("");
+      keepAwake(false);
+    }
+  });
 
   $("maxMB").addEventListener("input", showPlan);
   $("maxPages").addEventListener("input", showPlan);
@@ -427,6 +478,88 @@
     return n;
   }
 
+  function filterNames(d){
+    var f = d.get(PDFName.of("Filter"));
+    if(!f) return [];
+    if(f instanceof PDFArray) return f.asArray().map(function(x){ return x.toString(); });
+    return [f.toString()];
+  }
+
+  // Re-encode one image XObject as a smaller JPEG through a canvas. Returns the
+  // bytes saved, or 0 when the image is one we will not touch.
+  async function shrinkImage(obj, maxDim, quality){
+    var d = obj.dict;
+    if(d.get(PDFName.of("Subtype")) !== PDFName.of("Image")) return 0;
+    if(d.get(PDFName.of("SMask")) || d.get(PDFName.of("Mask"))) return 0;   // keep transparency intact
+    if(d.get(PDFName.of("ImageMask"))) return 0;
+    var wObj = d.get(PDFName.of("Width")), hObj = d.get(PDFName.of("Height"));
+    if(!wObj || !hObj) return 0;
+    var w = wObj.asNumber(), h = hObj.asNumber();
+    if(!(w > 0 && h > 0)) return 0;
+    var was = obj.contents ? obj.contents.length : 0;
+    if(was < 24 * 1024) return 0;                       // not worth the work
+
+    var filters = filterNames(d), bitmap = null;
+    try{
+      if(filters.length === 1 && filters[0] === "/DCTDecode"){
+        bitmap = await createImageBitmap(new Blob([obj.contents], { type: "image/jpeg" }));
+      }else if(filters.length === 1 && filters[0] === "/FlateDecode" && !d.get(PDFName.of("DecodeParms"))){
+        var cs = d.get(PDFName.of("ColorSpace"));
+        var bpc = d.get(PDFName.of("BitsPerComponent"));
+        if(!bpc || bpc.asNumber() !== 8) return 0;
+        var comps = cs === PDFName.of("DeviceRGB") ? 3 : (cs === PDFName.of("DeviceGray") ? 1 : 0);
+        if(!comps) return 0;
+        var raw = decodePDFRawStream(obj).decode();
+        if(raw.length < w * h * comps) return 0;
+        var img = new ImageData(w, h);
+        for(var i = 0, o = 0, r = 0; i < w * h; i++){
+          var v0 = raw[r], v1 = comps === 3 ? raw[r + 1] : v0, v2 = comps === 3 ? raw[r + 2] : v0;
+          img.data[o++] = v0; img.data[o++] = v1; img.data[o++] = v2; img.data[o++] = 255;
+          r += comps;
+        }
+        bitmap = await createImageBitmap(img);
+      }else return 0;
+    }catch(e){ return 0; }
+
+    var scale = Math.min(1, maxDim / Math.max(w, h));
+    var nw = Math.max(1, Math.round(w * scale)), nh = Math.max(1, Math.round(h * scale));
+    var canvas = document.createElement("canvas");
+    canvas.width = nw; canvas.height = nh;
+    var ctx = canvas.getContext("2d");
+    ctx.drawImage(bitmap, 0, 0, nw, nh);
+    bitmap.close && bitmap.close();
+
+    var blob = await new Promise(function(res){ canvas.toBlob(res, "image/jpeg", quality); });
+    if(!blob) return 0;
+    var bytes = new Uint8Array(await blob.arrayBuffer());
+    if(bytes.length >= was) return 0;                   // no gain: leave it alone
+
+    obj.contents = bytes;
+    d.set(PDFName.of("Filter"), PDFName.of("DCTDecode"));
+    d.set(PDFName.of("Width"), PDFNumber.of(nw));
+    d.set(PDFName.of("Height"), PDFNumber.of(nh));
+    d.set(PDFName.of("ColorSpace"), PDFName.of("DeviceRGB"));
+    d.set(PDFName.of("BitsPerComponent"), PDFNumber.of(8));
+    d.set(PDFName.of("Length"), PDFNumber.of(bytes.length));
+    d.delete(PDFName.of("DecodeParms"));
+    return was - bytes.length;
+  }
+
+  async function shrinkAllImages(maxDim, quality){
+    var objs = srcDoc.context.enumerateIndirectObjects(), saved = 0, touched = 0;
+    for(var i = 0; i < objs.length; i++){
+      var obj = objs[i][1];
+      if(!(obj instanceof PDFRawStream)) continue;
+      var gain = await shrinkImage(obj, maxDim, quality);
+      if(gain > 0){ saved += gain; touched++; }
+      if(touched && touched % 12 === 0){
+        status("Shrinking images \u2014 " + touched + " done, " + fmtSize(saved) + " saved");
+        await breathe();
+      }
+    }
+    return { saved: saved, touched: touched };
+  }
+
   // A part's size is not pages x average: it is whatever every part has to
   // carry (shared images, fonts) plus a per-page cost. Build two small probes
   // and solve for both, so the page count comes from measurement, not a guess.
@@ -438,6 +571,7 @@
     var b = (await build(seq(0, nB))).length;
     var marginal = Math.max(1, (b - a) / (nB - nA));
     calib = { overhead: Math.max(0, a - nA * marginal), marginal: marginal };
+    try{ parts0 = await breakdown(); }catch(e){ parts0 = null; }
   }
 
   // Pages per part, from the measured model. Returns 0 when even one page
@@ -450,6 +584,27 @@
     var usable = maxBytes * 0.97 - calib.overhead;
     if(usable < calib.marginal) return 0;
     return Math.max(1, Math.min(maxPages, totalPages, Math.floor(usable / calib.marginal)));
+  }
+
+  // What a single-page part is actually made of. Knowing whether the weight is
+  // images or fonts decides whether shrinking images can help at all.
+  async function breakdown(){
+    var one = await build(seq(0, 1));
+    var doc = await PDFDocument.load(one, { updateMetadata: false });
+    var sum = { image: 0, font: 0, other: 0 }, images = 0;
+    var objs = doc.context.enumerateIndirectObjects();
+    for(var i = 0; i < objs.length; i++){
+      var obj = objs[i][1];
+      if(!(obj instanceof PDFRawStream)) continue;
+      var len = obj.contents ? obj.contents.length : 0, d = obj.dict;
+      var sub = d.get(PDFName.of("Subtype"));
+      if(sub === PDFName.of("Image")){ sum.image += len; images++; }
+      else if(d.get(PDFName.of("FontFile")) || d.get(PDFName.of("FontFile2")) ||
+              d.get(PDFName.of("FontFile3")) || sub === PDFName.of("Type1C") ||
+              sub === PDFName.of("CIDFontType0C") || sub === PDFName.of("OpenType")) sum.font += len;
+      else sum.other += len;
+    }
+    return { image: sum.image, font: sum.font, other: sum.other, images: images };
   }
 
   function smallestPossible(){
