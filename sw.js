@@ -1,5 +1,7 @@
 /* Cache-first service worker: the app is static, so once it is cached the
-   page works with no network at all. Bump CACHE when index.html changes. */
+   page works with no network at all. Bump CACHE when index.html changes, and
+   keep it in step with the version and date in that file's footer — that
+   footer is how anyone checks which build they are actually running. */
 var CACHE = "pdf-splitter-v6";
 var ASSETS = [
   "./",

@@ -73,3 +73,8 @@ iOS limits how many downloads a page may start in a row.
 | `manifest.webmanifest`, `icon-*` | Home Screen / installable-app metadata |
 
 No build step — edit `index.html` directly.
+
+When changing `index.html`, bump three things together: the version and date in
+its footer, and `CACHE` in `sw.js`. The footer is how anyone checks which build
+they are actually running, and the cache name is what makes an installed copy
+pick the new one up.

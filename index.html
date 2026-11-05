@@ -67,7 +67,8 @@
   .status{font-size:13px;color:var(--muted);margin:8px 2px 0;font-variant-numeric:tabular-nums}
   .note{font-size:14px;border-radius:10px;padding:10px 12px;margin-top:12px;background:var(--warn-bg);color:var(--warn)}
   .hide{display:none}
-  footer{color:var(--muted);font-size:12px;text-align:center;margin-top:22px}
+  footer{color:var(--muted);font-size:12px;text-align:center;margin-top:22px;line-height:1.7}
+  footer b{color:var(--ink);font-weight:600}
 </style>
 </head>
 <body>
@@ -124,7 +125,10 @@
     <p class="hint">On iPad each part saves to Files (Downloads). Tap the buttons one at a time if Safari blocks the batch save.</p>
   </div>
 
-  <footer>Runs entirely offline · pdf-lib</footer>
+  <footer>
+    <b id="ver">v6</b> · updated 5 November 2026<br>
+    Runs entirely offline · pdf-lib
+  </footer>
 </div>
 
 <script id="pdflib-vendor">!function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"function"==typeof define&&define.amd?define(["exports"],e):e((t=t||self).PDFLib={})}(this,(function(t){"use strict";
