@@ -10,6 +10,13 @@ Open **https://viatekh.github.io/pdf-splitter/**, then Share → **Add to Home
 Screen**. A service worker caches the app on first visit, so the Home Screen
 icon works with no connection afterwards.
 
+The page is fetched network-first, so a launch with a connection always runs
+the current build, and the footer shows which version that is. If an installed
+copy is ever stuck on an old version, clear its data: iOS Settings → Apps →
+Safari → Advanced → Website Data, remove `viatekh.github.io`, then reopen. A
+private tab bypasses the service worker entirely and always shows what is
+actually deployed.
+
 > **Note:** you cannot open a saved `.html` file in Safari on iPadOS. Tapping
 > one in Files gives a read-only Quick Look preview where the file picker and
 > downloads don't work, and there is no way to hand it to Safari. The URL above
