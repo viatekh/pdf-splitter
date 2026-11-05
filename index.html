@@ -127,7 +127,7 @@
   </div>
 
   <footer>
-    <b id="ver">v9</b> · updated 5 November 2026<br>
+    <b id="ver">v10</b> · updated 5 November 2026<br>
     Runs entirely offline · pdf-lib
   </footer>
 </div>
@@ -213,18 +213,21 @@
     if(!(mb > 0) || !(mp > 0)){ el.textContent = "Enter a size and page limit above 0."; return; }
     var n = pagesPerPart(Math.round(mb * 1024 * 1024), mp);
     if(n === 0){
-      var what = "";
-      if(parts0 && parts0.image + parts0.font > 0){
+      var what = "", imagesDominate = false;
+      if(parts0){
+        var rest = Math.max(0, calib.overhead - parts0.image - parts0.font);
+        imagesDominate = parts0.image > calib.overhead * 0.5;
         what = " That weight is " + fmtSize(parts0.image) + " of images across " + parts0.images +
-               " of them, and " + fmtSize(parts0.font) + " of embedded fonts.";
+               " of them, " + fmtSize(parts0.font) + " of embedded fonts, and " + fmtSize(rest) +
+               " of other page objects.";
       }
       el.textContent = "Every part has to carry " + fmtSize(calib.overhead) +
         " shared across the whole PDF, so the smallest possible part is about " +
         fmtSize(smallestPossible()) + "." + what +
-        (parts0 && parts0.image > parts0.font
+        (imagesDominate
           ? " Shrinking the images should bring it under the limit."
-          : " Most of that is fonts, which this app cannot shrink \u2014 raise the limit or compress the PDF elsewhere.");
-      show($("shrink"), !!(parts0 && parts0.image > calib.overhead * 0.4));
+          : " That is not mostly images, so shrinking them will not help \u2014 raise the limit, or compress the PDF elsewhere.");
+      show($("shrink"), imagesDominate);
       return;
     }
     show($("shrink"), false);
@@ -472,10 +475,34 @@
     return true;
   }
 
+  // A link annotation that jumps to another page holds a direct reference to
+  // it. Copying one page then pulls in the page it links to, which pulls in
+  // its own links, and so on until an entire cross-referenced manual rides
+  // along in every part. Links are navigation only — nothing is lost from the
+  // page itself by dropping them.
+  function stripLinks(page){
+    var annots = srcDoc.context.lookup(page.get(PDFName.of("Annots")));
+    if(!(annots instanceof PDFArray)) return 0;
+    var keep = [], dropped = 0, items = annots.asArray();
+    for(var i = 0; i < items.length; i++){
+      var a = srcDoc.context.lookup(items[i]);
+      var isLink = a instanceof PDFDict && a.get(PDFName.of("Subtype")) === PDFName.of("Link");
+      if(isLink){ dropped++; continue; }
+      keep.push(items[i]);
+    }
+    if(!dropped) return 0;
+    if(keep.length) page.set(PDFName.of("Annots"), srcDoc.context.obj(keep));
+    else page.delete(PDFName.of("Annots"));
+    return dropped;
+  }
+
   function pruneAll(){
-    var pages = srcDoc.getPages(), n = 0;
-    for(var i = 0; i < pages.length; i++){ if(prunePage(pages[i].node)) n++; }
-    return n;
+    var pages = srcDoc.getPages(), n = 0, links = 0;
+    for(var i = 0; i < pages.length; i++){
+      links += stripLinks(pages[i].node);
+      if(prunePage(pages[i].node)) n++;
+    }
+    return { pruned: n, links: links };
   }
 
   function filterNames(d){
