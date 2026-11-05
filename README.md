@@ -54,7 +54,12 @@ iOS limits how many downloads a page may start in a row.
   before anything is copied. Many PDFs declare every image and font once, high
   in the page tree, so each page inherits the lot and a naive copy drags the
   whole pool into every part — a 35 MB manual splitting into six 35 MB parts.
-  Form XObjects are followed rather than avoided: the names a form uses are
+  Link annotations are dropped before copying. A link to another page holds a
+  direct reference to it, so copying one page follows that link, then the links
+  on the page it reaches, until a whole cross-referenced manual rides along in
+  every part. Page content, layout and text are unaffected; only clickable
+  navigation goes.
+- Form XObjects are followed rather than avoided: the names a form uses are
   folded into its page's set, nested forms included, so a running header drawn
   as a form does not disable the trimming for every page that has one.
 - A part that still lands over the cap is rebuilt once, smaller, and the pages
