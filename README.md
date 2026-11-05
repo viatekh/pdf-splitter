@@ -54,8 +54,9 @@ iOS limits how many downloads a page may start in a row.
   before anything is copied. Many PDFs declare every image and font once, high
   in the page tree, so each page inherits the lot and a naive copy drags the
   whole pool into every part — a 35 MB manual splitting into six 35 MB parts.
-  Pages holding form XObjects are left untouched, since those can draw with
-  resources they do not name.
+  Form XObjects are followed rather than avoided: the names a form uses are
+  folded into its page's set, nested forms included, so a running header drawn
+  as a form does not disable the trimming for every page that has one.
 - A part that still lands over the cap is rebuilt once, smaller, and the pages
   it drops move into the next part. Anything over after that is flagged.
 - Every part is reopened and page-counted after splitting; anything unreadable

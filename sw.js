@@ -7,7 +7,7 @@
    Bump CACHE when index.html changes, and keep it in step with the version and
    date in that file's footer — the footer is how anyone checks which build they
    are actually running. */
-var CACHE = "pdf-splitter-v7";
+var CACHE = "pdf-splitter-v8";
 var ASSETS = [
   "./",
   "./index.html",

@@ -126,7 +126,7 @@
   </div>
 
   <footer>
-    <b id="ver">v7</b> · updated 5 November 2026<br>
+    <b id="ver">v8</b> · updated 5 November 2026<br>
     Runs entirely offline · pdf-lib
   </footer>
 </div>
@@ -338,33 +338,72 @@
   // the page tree, so each page inherits the lot. Copying any page then drags
   // the whole pool along and every part comes out nearly file-sized. Narrow
   // each page's resources to the names its own content stream actually uses.
+  function streamText(stream){
+    if(!(stream instanceof PDFRawStream)) return null;
+    try{
+      var bytes = decodePDFRawStream(stream).decode(), text = "";
+      for(var i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
+      return text;
+    }catch(e){ return null; }
+  }
+
+  function namesIn(text){
+    return text.match(/\/[^\s\/\[\]<>(){}]+/g) || [];
+  }
+
   function pageContent(page){
     var c = page.Contents();
     if(!c) return null;
     var streams = c instanceof PDFArray ? c.asArray().map(function(r){ return srcDoc.context.lookup(r); }) : [c];
     var text = "";
     for(var i = 0; i < streams.length; i++){
-      if(!(streams[i] instanceof PDFRawStream)) return null;
-      try{
-        var bytes = decodePDFRawStream(streams[i]).decode();
-        for(var j = 0; j < bytes.length; j++) text += String.fromCharCode(bytes[j]);
-      }catch(e){ return null; }
+      var part = streamText(streams[i]);
+      if(part === null) return null;
+      text += part + "\n";
     }
     return text;
   }
 
   var PRUNABLE = ["XObject", "Font", "ExtGState", "Shading", "Pattern", "ColorSpace", "Properties"];
 
+  // A form XObject draws with its own resources when it has them and the
+  // page's when it does not, and may nest. Walk them and fold every name they
+  // use into the page's set, so following a form is safe instead of a reason
+  // to give up on the page.
+  function addFormNames(res, used, depth, seen){
+    if(depth > 4) return false;
+    var xo = res ? srcDoc.context.lookup(res.get(PDFName.of("XObject"))) : null;
+    if(!(xo instanceof PDFDict)) return true;
+    var entries = xo.entries();
+    for(var i = 0; i < entries.length; i++){
+      if(!used[entries[i][0].asString().slice(1)]) continue;
+      var ref = entries[i][1], form = srcDoc.context.lookup(ref);
+      if(!form || !form.dict) continue;
+      if(form.dict.get(PDFName.of("Subtype")) !== PDFName.of("Form")) continue;
+      var key = ref.toString();
+      if(seen[key]) continue;
+      seen[key] = true;
+      var text = streamText(form);
+      if(text === null) return false;                  // unreadable form: keep everything
+      var names = namesIn(text);
+      for(var n = 0; n < names.length; n++) used[names[n].slice(1)] = true;
+      var own = srcDoc.context.lookup(form.dict.get(PDFName.of("Resources")));
+      if(!addFormNames(own instanceof PDFDict ? own : res, used, depth + 1, seen)) return false;
+    }
+    return true;
+  }
+
   function prunePage(page){
     var res = page.Resources();
     if(!(res instanceof PDFDict)) return false;
     var text = pageContent(page);
     if(text === null) return false;                     // can't read it, so keep everything
-    var names = text.match(/\/[^\s\/\[\]<>(){}]+/g) || [];
+    var names = namesIn(text);
     var used = {};
     for(var i = 0; i < names.length; i++) used[names[i].slice(1)] = true;
+    if(!addFormNames(res, used, 0, {})) return false;
 
-    var trimmed = srcDoc.context.obj({}), sawForm = false;
+    var trimmed = srcDoc.context.obj({});
     var entries = res.entries();
     for(var e = 0; e < entries.length; e++){
       var key = entries[e][0], val = entries[e][1];
@@ -374,16 +413,10 @@
       var kept = srcDoc.context.obj({}), subEntries = sub.entries();
       for(var k = 0; k < subEntries.length; k++){
         if(!used[subEntries[k][0].asString().slice(1)]) continue;
-        var target = srcDoc.context.lookup(subEntries[k][1]);
-        if(cat === "XObject" && target && target.dict &&
-           target.dict.get(PDFName.of("Subtype")) === PDFName.of("Form")) sawForm = true;
         kept.set(subEntries[k][0], subEntries[k][1]);
       }
       trimmed.set(key, kept);
     }
-    // A form XObject can draw using resources it does not name itself, so leave
-    // any page holding one exactly as it was.
-    if(sawForm) return false;
     page.set(PDFName.of("Resources"), trimmed);
     return true;
   }
